@@ -7,14 +7,10 @@
 
 namespace ob {
 
-// Fixed-capacity object pool. Allocation/deallocation is O(1) via a free-list
-// threaded through the slots themselves. No malloc on the hot path once
-// pre-sized. Designed for one producer (the order-book thread).
 template <class T>
 class ObjectPool {
 public:
     explicit ObjectPool(std::size_t capacity) : storage_(capacity) {
-        // Build a free-list linking every slot.
         for (std::size_t i = 0; i + 1 < capacity; ++i) {
             storage_[i].next_free = &storage_[i + 1];
         }
@@ -25,7 +21,6 @@ public:
     ObjectPool(const ObjectPool&) = delete;
     ObjectPool& operator=(const ObjectPool&) = delete;
 
-    // Returns nullptr if pool exhausted — caller must handle.
     template <class... Args>
     [[nodiscard]] T* acquire(Args&&... args) noexcept {
         if (!free_head_) return nullptr;

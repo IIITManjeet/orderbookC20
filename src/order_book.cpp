@@ -7,7 +7,6 @@ namespace ob {
 namespace {
 
 OB_ALWAYS_INLINE bool price_crosses(Side taker, Price taker_px, Price book_px) noexcept {
-    // Buy crosses an ask priced <= taker_px; Sell crosses a bid priced >= taker_px.
     return taker == Side::Buy ? book_px <= taker_px : book_px >= taker_px;
 }
 
@@ -21,15 +20,12 @@ Quantity OrderBook::match(Order& taker, const TradeCallback& on_trade) {
         PriceLevel* best = opp.best();
         if (!best) break;
 
-        // For Market orders, treat as cross-anything; for Limit/IOC/FOK
-        // respect the limit price.
         const bool unlimited = (taker.type == OrderType::Market);
         if (OB_UNLIKELY(!unlimited &&
                         !price_crosses(TakerSide, taker.price, best->price))) {
             break;
         }
 
-        // Fill against the FIFO at this level until exhausted or taker filled.
         while (taker.qty > 0 && best->head) {
             Order* maker = best->head;
             const Quantity fill = std::min(taker.qty, maker->qty);
@@ -42,12 +38,11 @@ Quantity OrderBook::match(Order& taker, const TradeCallback& on_trade) {
                 .ts       = taker.ts,
             });
 
-            taker.qty   -= fill;
-            maker->qty  -= fill;
+            taker.qty       -= fill;
+            maker->qty      -= fill;
             best->total_qty -= fill;
 
             if (maker->qty == 0) {
-                // Maker fully filled — remove from level and pool.
                 best->head = maker->next;
                 if (best->head) best->head->prev = nullptr;
                 else            best->tail = nullptr;
@@ -73,8 +68,6 @@ bool OrderBook::submit(OrderId id, Side side, OrderType type, Price price,
                        const TradeCallback& on_trade) {
     if (OB_UNLIKELY(qty == 0)) return true;
 
-    // Allocate transient order on the pool — even if it never rests, the
-    // matcher needs a stable home for its mutable qty field.
     Order* o = pool_.acquire();
     if (OB_UNLIKELY(!o)) return false;
     o->id    = id;
@@ -85,8 +78,6 @@ bool OrderBook::submit(OrderId id, Side side, OrderType type, Price price,
     o->type  = type;
     o->prev  = o->next = nullptr;
 
-    // FOK: dry-run scan of opposite side from best toward worst. If the full
-    // qty can't be filled at crossing prices, drop the order without trading.
     if (type == OrderType::FOK) {
         const SideBook& opp = (side == Side::Buy) ? asks_ : bids_;
         const auto levels = opp.levels_view();
@@ -97,7 +88,7 @@ bool OrderBook::submit(OrderId id, Side side, OrderType type, Price price,
         }
         if (needed > 0) {
             pool_.release(o);
-            return true;  // FOK rejected — no fills, no resting.
+            return true;
         }
     }
 
@@ -106,13 +97,11 @@ bool OrderBook::submit(OrderId id, Side side, OrderType type, Price price,
         : match<Side::Sell>(*o, on_trade);
     o->qty = remaining;
 
-    const bool should_rest =
-        remaining > 0 && type == OrderType::Limit;
+    const bool should_rest = remaining > 0 && type == OrderType::Limit;
 
     if (should_rest) {
         rest(o);
     } else {
-        // IOC/Market/FOK leftovers and fully-filled orders are released.
         pool_.release(o);
     }
     return true;
@@ -134,7 +123,6 @@ bool OrderBook::cancel(OrderId id) {
     return true;
 }
 
-// Explicit template instantiation so the matcher lives in this TU.
 template Quantity OrderBook::match<Side::Buy>(Order&, const TradeCallback&);
 template Quantity OrderBook::match<Side::Sell>(Order&, const TradeCallback&);
 

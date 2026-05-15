@@ -10,7 +10,6 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-# Project-local flags applied only to our targets (not to FetchContent deps).
 set(OB_COMPILE_OPTS
     -Wall -Wextra -Wpedantic
     $<$<CONFIG:Release>:-O3>
@@ -35,6 +34,7 @@ target_link_options(demo PRIVATE ${OB_LINK_OPTS})
 
 option(BUILD_TESTS "Build unit tests" ON)
 option(BUILD_BENCH "Build benchmarks" ON)
+option(BUILD_LIVE  "Build live Binance paper-trader" ON)
 
 include(FetchContent)
 
@@ -71,4 +71,42 @@ if(BUILD_BENCH)
     target_link_libraries(bench_throughput PRIVATE order_book benchmark::benchmark)
     target_compile_options(bench_throughput PRIVATE ${OB_COMPILE_OPTS})
     target_link_options(bench_throughput PRIVATE ${OB_LINK_OPTS})
+endif()
+
+if(BUILD_LIVE)
+    find_package(CURL REQUIRED)
+
+    FetchContent_Declare(
+        nlohmann_json
+        GIT_REPOSITORY https://github.com/nlohmann/json.git
+        GIT_TAG v3.11.3
+    )
+    set(JSON_BuildTests OFF CACHE INTERNAL "")
+    set(JSON_Install OFF CACHE INTERNAL "")
+    FetchContent_MakeAvailable(nlohmann_json)
+
+    add_library(live_core STATIC
+        src/feed.cpp
+        src/trading_engine.cpp
+    )
+    target_include_directories(live_core PUBLIC include)
+    target_link_libraries(live_core
+        PUBLIC  order_book
+        PRIVATE CURL::libcurl nlohmann_json::nlohmann_json
+    )
+    target_compile_options(live_core PRIVATE ${OB_COMPILE_OPTS})
+    target_link_options(live_core PRIVATE ${OB_LINK_OPTS})
+
+    add_executable(live_trade src/live_trade.cpp)
+    target_link_libraries(live_trade PRIVATE live_core)
+    target_compile_options(live_trade PRIVATE ${OB_COMPILE_OPTS})
+    target_link_options(live_trade PRIVATE ${OB_LINK_OPTS})
+
+    if(BUILD_TESTS)
+        add_executable(test_live tests/test_live.cpp)
+        target_link_libraries(test_live PRIVATE live_core gtest_main)
+        target_compile_options(test_live PRIVATE ${OB_COMPILE_OPTS})
+        target_link_options(test_live PRIVATE ${OB_LINK_OPTS})
+        gtest_discover_tests(test_live)
+    endif()
 endif()

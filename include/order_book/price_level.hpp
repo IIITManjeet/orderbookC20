@@ -5,13 +5,9 @@
 
 namespace ob {
 
-// Intrusive FIFO queue of orders resting at one price. Price-time priority
-// means oldest order (head) gets filled first.
-//
-// All links live inside Order itself — no per-order allocation here.
 struct alignas(kCacheLine) PriceLevel {
     Price    price{0};
-    Quantity total_qty{0};   // sum of qty across all orders, kept in sync
+    Quantity total_qty{0};
     Order*   head{nullptr};
     Order*   tail{nullptr};
 
