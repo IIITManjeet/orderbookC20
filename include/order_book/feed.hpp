@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <thread>
 
 #include "order_book/spsc_queue.hpp"
@@ -34,6 +35,7 @@ Price    to_price(double usd) noexcept;
 Quantity to_qty(double btc) noexcept;
 double   from_price(Price p) noexcept;
 double   from_qty(Quantity q) noexcept;
+bool parse_ws_book_ticker(std::string_view payload, MarketEvent& out) noexcept;
 
 class Feed {
 public:
@@ -64,6 +66,27 @@ private:
     SPSCQueue<MarketEvent>& sink_;
     std::chrono::milliseconds interval_;
     BinanceMarket market_;
+    std::atomic<bool> running_{false};
+    std::thread thread_;
+};
+class WebSocketBinanceFeed final : public Feed {
+public:
+    WebSocketBinanceFeed(std::string symbol,
+                         SPSCQueue<MarketEvent>& sink,
+                         BinanceMarket market = BinanceMarket::Futures);
+    ~WebSocketBinanceFeed() override;
+
+    WebSocketBinanceFeed(const WebSocketBinanceFeed&) = delete;
+    WebSocketBinanceFeed& operator=(const WebSocketBinanceFeed&) = delete;
+
+    void start() override;
+    void stop() override;
+
+private:
+    void run();
+
+    std::string url_;
+    SPSCQueue<MarketEvent>& sink_;
     std::atomic<bool> running_{false};
     std::thread thread_;
 };

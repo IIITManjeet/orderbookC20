@@ -77,6 +77,30 @@ TEST(MeanReversion, SellsOnPositiveDeviation) {
     EXPECT_EQ(act->side, Side::Sell);
 }
 
+TEST(WebSocketFeed, ParsesBookTickerFrame) {
+    const std::string frame =
+        R"({"e":"bookTicker","u":400900217,"E":1568014460893,"T":1568014460891,)"
+        R"("s":"BTCUSDT","b":"65000.10","B":"1.234000","a":"65000.50","A":"2.500000"})";
+
+    MarketEvent ev;
+    ev.ts = 12345;
+    ASSERT_TRUE(parse_ws_book_ticker(frame, ev));
+
+    EXPECT_EQ(ev.kind, MarketEventKind::BookTicker);
+    EXPECT_EQ(ev.best_bid, to_price(65000.10));
+    EXPECT_EQ(ev.best_ask, to_price(65000.50));
+    EXPECT_EQ(ev.bid_qty, to_qty(1.234000));
+    EXPECT_EQ(ev.ask_qty, to_qty(2.500000));
+    EXPECT_EQ(ev.last_trade, (to_price(65000.10) + to_price(65000.50)) / 2);
+    EXPECT_EQ(ev.ts, 12345u);
+}
+
+TEST(WebSocketFeed, RejectsMalformedFrame) {
+    MarketEvent ev;
+    EXPECT_FALSE(parse_ws_book_ticker("not json", ev));
+    EXPECT_FALSE(parse_ws_book_ticker(R"({"e":"bookTicker","s":"BTCUSDT"})", ev));
+}
+
 TEST(SyntheticFeed, ProducesEventsAndIsDeterministic) {
     SPSCQueue<MarketEvent> q1(128);
     SPSCQueue<MarketEvent> q2(128);

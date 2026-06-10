@@ -26,16 +26,35 @@ cmake --build build -j
 ./build/bench_throughput           # Google Benchmark
 ./build/live_trade                                                          # default: synthetic
 ./build/live_trade --source synthetic --sigma 30                            # noisier random walk
-./build/live_trade --source binance --market futures --symbol BTCUSDT       # USDT-M perpetual (default market)
-./build/live_trade --source binance --market spot    --symbol BTCUSDT       # spot
-./build/live_trade --source binance --market futures --symbol BTCUSDT --poll-ms 250 --seconds 60
+./build/live_trade --source binance --market futures --symbol BTCUSDT       # WebSocket feed (default), USDT-M perpetual
+./build/live_trade --source binance --market spot    --symbol BTCUSDT       # WebSocket feed, spot
+./build/live_trade --source binance --feed rest --market futures --symbol BTCUSDT --poll-ms 250  # REST polling instead
+./build/live_trade --source binance --feed ws   --market futures --symbol BTCUSDT --seconds 60   # WS, auto-stop
 ```
+
+### Building on Windows (Git Bash + MSYS2)
+
+The same tree builds on Windows with the MSYS2 MinGW64 toolchain (gcc, cmake,
+ninja, libcurl, openssl all from `mingw-w64-x86_64-*`). From **Git Bash**, put
+MSYS2's MinGW64 bin on PATH and use the Ninja generator:
+
+```bash
+export PATH="/c/msys64/mingw64/bin:$PATH"
+cmake -G Ninja -S . -B build-win
+cmake --build build-win
+./build-win/test_order_book.exe && ./build-win/test_live.exe
+./build-win/live_trade.exe --source binance --feed ws --market futures --symbol BTCUSDT
+```
+
+IXWebSocket defaults to mbedtls on Windows, so `CMakeLists.txt` pins the OpenSSL
+backend there (`USE_OPEN_SSL`); Linux/macOS keep their native defaults.
 
 Flags for `live_trade`:
 - `--source binance|synthetic`   data source (default: `synthetic`)
+- `--feed ws|rest`               Binance transport: WebSocket or REST poll (default: `ws`)
 - `--market futures|spot`        Binance venue when `--source binance` (default: `futures`)
 - `--symbol BTCUSDT`             Binance pair (binance source only)
-- `--poll-ms 250`                feed tick interval in ms
+- `--poll-ms 250`                REST feed tick interval in ms (`--feed rest` only)
 - `--seconds 0`                  auto-stop after N seconds (0 = until Ctrl-C)
 - `--seed 42`                    RNG seed (synthetic, reproducible runs)
 - `--start-price 80000`          synthetic initial mid
@@ -61,7 +80,19 @@ the fill. At exit, a percentile summary covers the whole run:
 
 What the number does *not* include: the TLS+TCP roundtrip to Binance (that's
 upstream of `ev.ts`). What it *does* include: SPSC pop → strategy on_tick →
-position update → callback invocation. Measured numbers on Apple M-series,
+position update → callback invocation.
+
+**REST vs WebSocket.** Both feeds stamp `ev.ts` with `now_ns()` at the same
+point — right after the JSON parse — so the latency numbers are directly
+comparable across `--feed rest` and `--feed ws`. The difference is *what the
+events are*: REST `bookTicker` is edge-cached and, in quiet markets, returns
+identical back-to-back snapshots, so consecutive polls carry no new
+information. The WebSocket feed is pushed tick-by-tick, so the telemetry
+reflects genuine order-book updates rather than re-stamped duplicates. A/B them
+in the same binary: run with `--feed rest` then `--feed ws` against the same
+symbol and compare the `[STATS]` summaries.
+
+Measured numbers on Apple M-series,
 single thread, busy-spin engine: **min ~5 µs, p50 ~10–20 µs**. With the
 default 200 µs engine back-off sleep enabled, p50 climbs to ~150 µs because
 events arriving mid-sleep wait out the remainder. Toggle by uncommenting the
@@ -92,8 +123,9 @@ tests/  bench/         GoogleTest + Google Benchmark
 ## Architecture
 
 ```
-Binance Futures ──[HTTPS]──> BinanceFeed thread          (libcurl + nlohmann/json)
-fapi.binance.com                  │  stamps ev.ts = now_ns() after parse
+Binance Futures ──[WSS]───> WebSocketBinanceFeed thread  (IXWebSocket + nlohmann/json)
+fstream.binance.com    └──[HTTPS, --feed rest]──> BinanceFeed thread  (libcurl)
+                                  │  stamps ev.ts = now_ns() after parse
                                   ▼  try_push()
                           SPSCQueue<MarketEvent>         (lock-free, cache-padded)
                                   │
@@ -131,14 +163,30 @@ exchange `MarketEvent`s without locks.
   available via `-DCMAKE_BUILD_TYPE=Debug`.
 
 ### Live path
-- **REST polling with libcurl**. Endpoint chosen at construction time:
+- **WebSocket feed (default)** via [IXWebSocket](https://github.com/machinezone/IXWebSocket),
+  pulled in by FetchContent like `nlohmann/json`. Subscribes to the
+  `<symbol>@bookTicker` stream (symbol lowercased as Binance requires):
+  - Futures (default): `wss://fstream.binance.com/ws/<symbol>@bookTicker`
+  - Spot:              `wss://stream.binance.com:9443/ws/<symbol>@bookTicker`
+
+  Chosen over Boost.Beast+OpenSSL for its one-line CMake integration and
+  built-in TLS (OpenSSL on Linux, SecureTransport on macOS — no separate TLS
+  wiring). The client runs on its own producer thread; the on-message handler
+  parses each frame, stamps `ev.ts`, and `try_push`es into the SPSC queue —
+  same contract as the REST producer. IXWebSocket auto-replies pong to
+  Binance's ping frames (RFC6455) and reconnects with exponential backoff
+  (1s → 30s cap) on disconnect.
+- **REST polling with libcurl** (`--feed rest`). Endpoint chosen at
+  construction time:
   - Futures (default): `fapi.binance.com/fapi/v1/ticker/bookTicker`
   - Spot:              `api.binance.com/api/v3/ticker/bookTicker`
 
   macOS system libcurl ships with SecureTransport TLS — no extra system
   dependency. Response schema is identical between the two venues, so the
   JSON parser is shared.
-- **`nlohmann/json`** via FetchContent — header-only.
+- **`nlohmann/json`** via FetchContent — header-only. Shared by both feeds; the
+  WS stream uses the compact `b`/`B`/`a`/`A` keys, REST the verbose
+  `bidPrice`/`bidQty`/`askPrice`/`askQty`.
 - **Paper trading**: orders fill immediately at the displayed best bid/ask.
   No real account, no real money, no API keys, no orders sent anywhere.
 - **Price scaling**: prices are stored as integer "ticks" of $0.01,
@@ -159,11 +207,6 @@ exchange `MarketEvent`s without locks.
   quiet BTC markets still produce visible fills, not as a viable strategy.
 
 ## Open next steps
-- Replace REST polling with WebSocket (futures:
-  `wss://fstream.binance.com/ws/<symbol>@bookTicker`, spot:
-  `wss://stream.binance.com:9443/ws/...`) for true tick-by-tick latency —
-  REST `bookTicker` is edge-cached, so back-to-back polls under quiet markets
-  return identical snapshots. Requires OpenSSL on macOS.
 - Multi-symbol, one engine per core, fed by one SPSC each.
 - Plug the live data into the internal `OrderBook` (synthetic L2) and
   run real limit orders through `submit()` instead of paper-filling
@@ -189,6 +232,6 @@ exchange `MarketEvent`s without locks.
 
 This is an educational project. The strategy is naive and will lose money
 in any non-trivial market regime. Do not point it at a real exchange
-account. The live trader uses only Binance's **public** REST endpoints
-(spot and USDT-M futures market data) — no API keys, no signed requests,
-no orders are ever sent to the exchange.
+account. The live trader uses only Binance's **public** market-data endpoints
+(spot and USDT-M futures, over WebSocket or REST) — no API keys, no signed
+requests, no orders are ever sent to the exchange.

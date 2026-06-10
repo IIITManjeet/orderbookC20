@@ -65,6 +65,7 @@ if(BUILD_BENCH)
     )
     set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "" FORCE)
     set(BENCHMARK_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+    set(BENCHMARK_ENABLE_WERROR OFF CACHE BOOL "" FORCE)  # newer GCC trips Benchmark's own -Werror=switch
     FetchContent_MakeAvailable(benchmark)
 
     add_executable(bench_throughput bench/bench_throughput.cpp)
@@ -85,6 +86,25 @@ if(BUILD_LIVE)
     set(JSON_Install OFF CACHE INTERNAL "")
     FetchContent_MakeAvailable(nlohmann_json)
 
+    # TLS WebSocket client for the tick-by-tick Binance feed. IXWebSocket bundles
+    # its own TLS plumbing (OpenSSL on Linux, SecureTransport on macOS) and has a
+    # one-line CMake integration, matching the FetchContent style above.
+    FetchContent_Declare(
+        ixwebsocket
+        GIT_REPOSITORY https://github.com/machinezone/IXWebSocket.git
+        GIT_TAG v11.4.5
+    )
+    set(USE_TLS ON CACHE BOOL "" FORCE)
+    set(USE_ZLIB OFF CACHE BOOL "" FORCE)        # Binance /ws streams aren't permessage-deflate compressed
+    set(IXWEBSOCKET_INSTALL OFF CACHE BOOL "" FORCE)
+    # Linux picks OpenSSL automatically; on Windows IXWebSocket defaults to
+    # mbedtls, so pin OpenSSL there (MSYS2/MinGW ships it) for a consistent
+    # backend. macOS keeps its SecureTransport default.
+    if(WIN32)
+        set(USE_OPEN_SSL ON CACHE BOOL "" FORCE)
+    endif()
+    FetchContent_MakeAvailable(ixwebsocket)
+
     add_library(live_core STATIC
         src/feed.cpp
         src/trading_engine.cpp
@@ -92,7 +112,7 @@ if(BUILD_LIVE)
     target_include_directories(live_core PUBLIC include)
     target_link_libraries(live_core
         PUBLIC  order_book
-        PRIVATE CURL::libcurl nlohmann_json::nlohmann_json
+        PRIVATE CURL::libcurl nlohmann_json::nlohmann_json ixwebsocket
     )
     target_compile_options(live_core PRIVATE ${OB_COMPILE_OPTS})
     target_link_options(live_core PRIVATE ${OB_LINK_OPTS})

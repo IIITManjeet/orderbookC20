@@ -24,9 +24,10 @@ static void print_usage() {
     std::puts(
         "Usage: live_trade [options]\n"
         "  --source binance|synthetic   data source (default: synthetic)\n"
+        "  --feed ws|rest               binance transport: WebSocket or REST poll (default: ws)\n"
         "  --market futures|spot        Binance market (default: futures)\n"
         "  --symbol BTCUSDT             Binance symbol (binance source only)\n"
-        "  --poll-ms 250                feed tick interval in ms\n"
+        "  --poll-ms 250                REST feed tick interval in ms (rest feed only)\n"
         "  --seconds 0                  auto-stop after N seconds (0 = until Ctrl-C)\n"
         "  --seed 42                    RNG seed (synthetic source only)\n"
         "  --start-price 80000          starting price USD (synthetic)\n"
@@ -38,6 +39,7 @@ int main(int argc, char** argv) {
     using namespace ob;
 
     std::string source     = "synthetic";
+    std::string feed_kind  = "ws";
     std::string market     = "futures";
     std::string symbol     = "BTCUSDT";
     int    poll_ms         = 250;
@@ -54,6 +56,7 @@ int main(int argc, char** argv) {
             return argv[++i];
         };
         if      (a == "--source")      source = next("--source");
+        else if (a == "--feed")        feed_kind = next("--feed");
         else if (a == "--market")      market = next("--market");
         else if (a == "--symbol")      symbol = next("--symbol");
         else if (a == "--poll-ms")     poll_ms = std::atoi(next("--poll-ms"));
@@ -80,7 +83,14 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "unknown market: %s (use futures|spot)\n", market.c_str());
             return 1;
         }
-        feed = std::make_unique<BinanceFeed>(symbol, q, std::chrono::milliseconds(poll_ms), bm);
+        if (feed_kind == "ws") {
+            feed = std::make_unique<WebSocketBinanceFeed>(symbol, q, bm);
+        } else if (feed_kind == "rest") {
+            feed = std::make_unique<BinanceFeed>(symbol, q, std::chrono::milliseconds(poll_ms), bm);
+        } else {
+            std::fprintf(stderr, "unknown feed: %s (use ws|rest)\n", feed_kind.c_str());
+            return 1;
+        }
     } else if (source == "synthetic") {
         SyntheticFeed::Config fcfg;
         fcfg.initial_price = start_price;
@@ -122,8 +132,8 @@ int main(int argc, char** argv) {
     engine.start();
 
     if (source == "binance") {
-        std::printf("source=binance market=%s symbol=%s poll=%dms — Ctrl-C to stop.\n",
-                    market.c_str(), symbol.c_str(), poll_ms);
+        std::printf("source=binance feed=%s market=%s symbol=%s poll=%dms — Ctrl-C to stop.\n",
+                    feed_kind.c_str(), market.c_str(), symbol.c_str(), poll_ms);
     } else {
         std::printf("source=synthetic start=$%.2f sigma=$%.2f drift=$%.2f seed=%u poll=%dms — Ctrl-C to stop.\n",
                     start_price, sigma, drift, seed, poll_ms);

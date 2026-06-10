@@ -1,5 +1,7 @@
 #include "order_book/feed.hpp"
 
+#include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -7,9 +9,13 @@
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
+
+#include <ixwebsocket/IXNetSystem.h>
+#include <ixwebsocket/IXWebSocket.h>
 
 namespace ob {
 
@@ -40,7 +46,34 @@ Timestamp now_ns() {
         duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count());
 }
 
+std::string lower(std::string_view s) {
+    std::string out(s);
+    std::transform(out.begin(), out.end(), out.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return out;
+}
+
 }  // namespace
+
+bool parse_ws_book_ticker(std::string_view payload, MarketEvent& out) noexcept {
+    try {
+        auto j = nlohmann::json::parse(payload);
+        const double bid  = std::stod(j.at("b").get<std::string>());
+        const double ask  = std::stod(j.at("a").get<std::string>());
+        const double bqty = std::stod(j.at("B").get<std::string>());
+        const double aqty = std::stod(j.at("A").get<std::string>());
+
+        out.kind       = MarketEventKind::BookTicker;
+        out.best_bid   = to_price(bid);
+        out.best_ask   = to_price(ask);
+        out.bid_qty    = to_qty(bqty);
+        out.ask_qty    = to_qty(aqty);
+        out.last_trade = (out.best_bid + out.best_ask) / 2;
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
 
 BinanceFeed::BinanceFeed(std::string symbol,
                          SPSCQueue<MarketEvent>& sink,
@@ -129,6 +162,56 @@ void BinanceFeed::run() {
             std::this_thread::sleep_for(interval_ - elapsed);
         }
     }
+}
+
+WebSocketBinanceFeed::WebSocketBinanceFeed(std::string symbol,
+                                           SPSCQueue<MarketEvent>& sink,
+                                           BinanceMarket market)
+    : sink_(sink) {
+    static std::once_flag g_net_init;
+    std::call_once(g_net_init, []() { ix::initNetSystem(); });
+
+    const std::string sym = lower(symbol);
+    url_ = (market == BinanceMarket::Futures)
+        ? "wss://fstream.binance.com/ws/" + sym + "@bookTicker"
+        : "wss://stream.binance.com:9443/ws/" + sym + "@bookTicker";
+}
+
+WebSocketBinanceFeed::~WebSocketBinanceFeed() { stop(); }
+
+void WebSocketBinanceFeed::start() {
+    if (running_.exchange(true)) return;
+    thread_ = std::thread([this] { run(); });
+}
+
+void WebSocketBinanceFeed::stop() {
+    if (!running_.exchange(false)) return;
+    if (thread_.joinable()) thread_.join();
+}
+
+void WebSocketBinanceFeed::run() {
+    ix::WebSocket ws;
+    ws.setUrl(url_);
+    ws.enableAutomaticReconnection();
+    ws.setMinWaitBetweenReconnectionRetries(1000);    // 1s
+    ws.setMaxWaitBetweenReconnectionRetries(30'000);
+    ws.setPingInterval(180);
+
+    ws.setOnMessageCallback([this](const ix::WebSocketMessagePtr& msg) {
+        if (msg->type != ix::WebSocketMessageType::Message) return;  
+        MarketEvent ev;
+        if (!parse_ws_book_ticker(msg->str, ev)) return;
+        ev.ts = now_ns();
+        while (running_.load(std::memory_order_acquire) && !sink_.try_push(ev)) {
+            std::this_thread::sleep_for(std::chrono::microseconds(50));
+        }
+    });
+
+    ws.start();
+    while (running_.load(std::memory_order_acquire)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    ws.stop();
 }
 
 SyntheticFeed::SyntheticFeed(SPSCQueue<MarketEvent>& sink,
