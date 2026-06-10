@@ -55,6 +55,12 @@ if(BUILD_TESTS)
 
     include(GoogleTest)
     gtest_discover_tests(test_order_book)
+
+    add_executable(test_latency_hist tests/test_latency_hist.cpp)
+    target_link_libraries(test_latency_hist PRIVATE order_book gtest_main)
+    target_compile_options(test_latency_hist PRIVATE ${OB_COMPILE_OPTS})
+    target_link_options(test_latency_hist PRIVATE ${OB_LINK_OPTS})
+    gtest_discover_tests(test_latency_hist)
 endif()
 
 if(BUILD_BENCH)
