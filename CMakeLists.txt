@@ -53,8 +53,14 @@ if(BUILD_TESTS)
     target_compile_options(test_order_book PRIVATE ${OB_COMPILE_OPTS})
     target_link_options(test_order_book PRIVATE ${OB_LINK_OPTS})
 
+    add_executable(test_risk tests/test_risk.cpp)
+    target_link_libraries(test_risk PRIVATE order_book gtest_main)
+    target_compile_options(test_risk PRIVATE ${OB_COMPILE_OPTS})
+    target_link_options(test_risk PRIVATE ${OB_LINK_OPTS})
+
     include(GoogleTest)
     gtest_discover_tests(test_order_book)
+    gtest_discover_tests(test_risk)
 endif()
 
 if(BUILD_BENCH)
