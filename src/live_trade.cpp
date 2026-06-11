@@ -11,6 +11,8 @@
 #include <vector>
 
 #include "order_book/feed.hpp"
+#include "order_book/latency_hist.hpp"
+#include "order_book/risk.hpp"
 #include "order_book/spsc_queue.hpp"
 #include "order_book/strategy.hpp"
 #include "order_book/trading_engine.hpp"
@@ -20,17 +22,17 @@ std::atomic<bool> g_stop{false};
 void on_signal(int) { g_stop.store(true); }
 
 // One independent pipeline per symbol: its own queue, feed, strategy (owned by
-// the engine), engine, and latency sample collection. Types here are
+// the engine), engine, and a fixed-memory latency histogram. Types here are
 // non-copyable (and SPSCQueue is non-movable), so each pipeline is heap-owned
-// and the latency container stays a plain std::vector<std::uint64_t> guarded by
-// a per-symbol mutex — easy to swap for a histogram later.
+// and the histogram is updated under a per-symbol mutex (the engine thread
+// writes via on_fill; the main thread reads it at exit).
 struct Pipeline {
     std::string symbol;
     std::unique_ptr<ob::SPSCQueue<ob::MarketEvent>> queue;
     std::unique_ptr<ob::Feed> feed;
     std::unique_ptr<ob::TradingEngine> engine;
 
-    std::vector<std::uint64_t> latencies_ns;
+    ob::LatencyHistogram lat_hist;
     std::mutex lat_mu;
 
     explicit Pipeline(std::string sym) : symbol(std::move(sym)) {}
@@ -66,7 +68,10 @@ static void print_usage() {
         "  --seed 42                    RNG seed (synthetic source only)\n"
         "  --start-price 80000          starting price USD (synthetic)\n"
         "  --sigma 5.0                  per-tick stddev USD (synthetic)\n"
-        "  --drift 0.0                  per-tick drift USD (synthetic)\n");
+        "  --drift 0.0                  per-tick drift USD (synthetic)\n"
+        "  --max-pos 0                  risk: max abs position BTC (0 = off)\n"
+        "  --max-notional 0             risk: max abs position notional USD (0 = off)\n"
+        "  --max-drawdown 0             risk: halt after equity drops USD from peak (0 = off)\n");
 }
 
 int main(int argc, char** argv) {
@@ -82,6 +87,9 @@ int main(int argc, char** argv) {
     double start_price     = 80000.0;
     double sigma           = 5.0;
     double drift           = 0.0;
+    double max_pos_btc     = 0.0;   // risk: max abs position in BTC (0 = off)
+    double max_notional    = 0.0;   // risk: max abs position notional in USD (0 = off)
+    double max_drawdown    = 0.0;   // risk: max equity drop from peak in USD (0 = off)
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -99,6 +107,9 @@ int main(int argc, char** argv) {
         else if (a == "--start-price") start_price = std::atof(next("--start-price"));
         else if (a == "--sigma")       sigma = std::atof(next("--sigma"));
         else if (a == "--drift")       drift = std::atof(next("--drift"));
+        else if (a == "--max-pos")     max_pos_btc = std::atof(next("--max-pos"));
+        else if (a == "--max-notional") max_notional = std::atof(next("--max-notional"));
+        else if (a == "--max-drawdown") max_drawdown = std::atof(next("--max-drawdown"));
         else if (a == "-h" || a == "--help") { print_usage(); return 0; }
         else { std::fprintf(stderr, "unknown arg: %s\n", a.c_str()); print_usage(); return 1; }
     }
@@ -135,6 +146,14 @@ int main(int argc, char** argv) {
     cfg.trade_qty = to_qty(0.001);
     cfg.cool_down = 5;
 
+    // Risk limits (integer-scaled). Any non-zero limit enables the gate per engine.
+    RiskConfig rcfg;
+    rcfg.max_position_qty = static_cast<std::int64_t>(to_qty(max_pos_btc));
+    rcfg.max_notional     = static_cast<std::int64_t>(to_price(max_notional));
+    rcfg.max_drawdown     = static_cast<std::int64_t>(to_price(max_drawdown));
+    const bool risk_on =
+        (rcfg.max_position_qty | rcfg.max_notional | rcfg.max_drawdown) != 0;
+
     // Build one pipeline per symbol. Held by unique_ptr so the per-symbol mutex
     // and queue (non-movable) stay pinned in place while engines reference them.
     std::vector<std::unique_ptr<Pipeline>> pipelines;
@@ -168,7 +187,7 @@ int main(int argc, char** argv) {
             const std::uint64_t lat_ns = (f.ts > f.event_ts) ? (f.ts - f.event_ts) : 0;
             {
                 std::lock_guard<std::mutex> g(self->lat_mu);
-                self->latencies_ns.push_back(lat_ns);
+                self->lat_hist.add(lat_ns);
             }
             std::printf("[FILL %s] %s  px=$%.2f  qty=%.6f BTC  lat=%.1fµs\n",
                         self->symbol.c_str(),
@@ -179,6 +198,7 @@ int main(int argc, char** argv) {
         };
 
         pipe->engine = std::make_unique<TradingEngine>(*pipe->queue, std::move(strat), on_fill);
+        if (risk_on) pipe->engine->set_risk(rcfg);
         pipelines.push_back(std::move(pipe));
     }
 
@@ -223,31 +243,19 @@ int main(int argc, char** argv) {
     }
 
     for (auto& pipe : pipelines) {
-        std::vector<std::uint64_t> samples;
-        {
-            std::lock_guard<std::mutex> g(pipe->lat_mu);
-            samples = pipe->latencies_ns;
-        }
-        if (!samples.empty()) {
-            std::sort(samples.begin(), samples.end());
-            const auto pct = [&](double p) {
-                const std::size_t idx = std::min(samples.size() - 1,
-                                                 static_cast<std::size_t>(p * samples.size()));
-                return samples[idx];
-            };
+        std::lock_guard<std::mutex> g(pipe->lat_mu);
+        const LatencyHistogram& h = pipe->lat_hist;
+        if (h.count() > 0) {
             const auto to_us = [](std::uint64_t ns) { return static_cast<double>(ns) / 1000.0; };
-            std::uint64_t sum = 0;
-            for (auto v : samples) sum += v;
-            const double mean_us = to_us(sum / samples.size());
-            std::printf("[STATS %s] fills=%zu  event→fill latency µs: "
+            std::printf("[STATS %s] fills=%llu  event→fill latency µs: "
                         "min=%.1f  p50=%.1f  p99=%.1f  max=%.1f  mean=%.1f\n",
                         pipe->symbol.c_str(),
-                        samples.size(),
-                        to_us(samples.front()),
-                        to_us(pct(0.50)),
-                        to_us(pct(0.99)),
-                        to_us(samples.back()),
-                        mean_us);
+                        static_cast<unsigned long long>(h.count()),
+                        to_us(h.min()),
+                        to_us(h.percentile_ns(0.50)),
+                        to_us(h.percentile_ns(0.99)),
+                        to_us(h.max()),
+                        h.mean_ns() / 1000.0);
         }
     }
 

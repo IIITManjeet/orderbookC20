@@ -97,7 +97,19 @@ void TradingEngine::refresh_quotes(const MarketSnapshot& s) {
     }
 }
 
-void TradingEngine::apply_action(const StrategyAction& a, const MarketSnapshot& s) {
+void TradingEngine::apply_action(const StrategyAction& proposed, const MarketSnapshot& s) {
+    if (proposed.qty == 0) return;
+
+    // Risk gate: clamp the size or reject the action (and permanently halt once
+    // the drawdown limit is breached) before anything reaches the book. The
+    // execution price used for the notional check is the quote the taker crosses.
+    StrategyAction a = proposed;
+    if (risk_) {
+        const Price gate_px = (proposed.side == Side::Buy) ? cur_ask_ : cur_bid_;
+        auto safe = risk_->gate(proposed, pos_.btc_qty, gate_px);
+        if (!safe) return;
+        a = *safe;
+    }
     if (a.qty == 0) return;
 
     // The taker crosses the opposite resting quote. Ensure that quote is resting
@@ -190,6 +202,9 @@ void TradingEngine::run() {
             .event_ts   = ev.ts,
         };
         last_mid_.store(snap.mid(), std::memory_order_relaxed);
+
+        // Feed current equity to the risk manager so it can track peak/drawdown.
+        if (risk_) risk_->observe_equity(equity_at(snap.mid()));
 
         // Maintain the internal order book's synthetic top-of-book before the
         // strategy acts so any taker crosses real resting liquidity.

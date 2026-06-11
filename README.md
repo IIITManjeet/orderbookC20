@@ -53,13 +53,16 @@ Flags for `live_trade`:
 - `--source binance|synthetic`   data source (default: `synthetic`)
 - `--feed ws|rest`               Binance transport: WebSocket or REST poll (default: `ws`)
 - `--market futures|spot`        Binance venue when `--source binance` (default: `futures`)
-- `--symbol BTCUSDT`             Binance pair (binance source only)
+- `--symbol BTCUSDT[,ETHUSDT…]`  comma-separated symbol list; one independent pipeline per symbol
 - `--poll-ms 250`                REST feed tick interval in ms (`--feed rest` only)
 - `--seconds 0`                  auto-stop after N seconds (0 = until Ctrl-C)
 - `--seed 42`                    RNG seed (synthetic, reproducible runs)
 - `--start-price 80000`          synthetic initial mid
 - `--sigma 5.0`                  synthetic per-tick stddev USD
 - `--drift 0.0`                  synthetic per-tick drift USD
+- `--max-pos 0`                  risk: max abs position in BTC (0 = off)
+- `--max-notional 0`             risk: max abs position notional in USD (0 = off)
+- `--max-drawdown 0`             risk: halt trading after equity drops USD from peak (0 = off)
 
 Synthetic mode runs the whole pipeline offline against a Gaussian random
 walk — useful for reproducible demos and stress-testing the engine without
@@ -187,15 +190,30 @@ exchange `MarketEvent`s without locks.
 - **`nlohmann/json`** via FetchContent — header-only. Shared by both feeds; the
   WS stream uses the compact `b`/`B`/`a`/`A` keys, REST the verbose
   `bidPrice`/`bidQty`/`askPrice`/`askQty`.
-- **Paper trading**: orders fill immediately at the displayed best bid/ask.
-  No real account, no real money, no API keys, no orders sent anywhere.
+- **Matching through the real `OrderBook`**: each tick refreshes a synthetic
+  top-of-book (one resting bid + ask at the displayed best prices/sizes, with
+  stable OrderIds so state stays bounded). Strategy actions are submitted as
+  marketable **IOC** orders through `OrderBook::submit()`, so fills come from
+  real `Trade`s — including realistic **partial fills** when the action size
+  exceeds the resting top-of-book. No real account, money, or API keys; no
+  orders sent anywhere.
+- **Risk module** (`risk.hpp`): an optional `RiskManager` gates every action
+  before it reaches the book — clamps size to a max abs **position** and max
+  **notional**, and permanently **halts** trading once equity drops more than
+  the drawdown limit from its peak. All integer math; enabled per engine via
+  `--max-pos` / `--max-notional` / `--max-drawdown` (0 = off).
+- **Multi-symbol**: `--symbol A,B,C` spawns one independent pipeline per
+  symbol — its own SPSC queue, feed, strategy, and engine — with per-symbol
+  `[FILL]` / `[STATUS]` / `[STATS]` lines.
 - **Price scaling**: prices are stored as integer "ticks" of $0.01,
   quantities as integer μBTC (1e-6 BTC). All math is integer; no floats on
   the hot path.
 - **Latency stamping**: feed sets `MarketEvent::ts` with `now_ns()` right
-  after the JSON parse; engine stamps `Fill::ts` at the moment of book
-  update. `Fill::event_ts` carries the feed timestamp through so the on_fill
-  callback can compute end-to-end latency without extra plumbing.
+  after the parse; engine stamps `Fill::ts` at the moment of book update.
+  `Fill::event_ts` carries the feed timestamp through so the on_fill callback
+  can compute end-to-end latency without extra plumbing. Samples are
+  accumulated into a fixed-memory `LatencyHistogram` (64 log2 buckets, exact
+  min/max/mean) so long runs don't grow an unbounded sample vector.
 
 ### Strategy: Mean Reversion
 - Rolling N-tick window of mid-prices.
@@ -207,14 +225,10 @@ exchange `MarketEvent`s without locks.
   quiet BTC markets still produce visible fills, not as a viable strategy.
 
 ## Open next steps
-- Multi-symbol, one engine per core, fed by one SPSC each.
-- Plug the live data into the internal `OrderBook` (synthetic L2) and
-  run real limit orders through `submit()` instead of paper-filling
-  against best bid/ask.
-- Risk module: position limits, max drawdown, P&L stop-out (current
-  mean-reversion happily accumulates in a trending market).
-- Histogram-bucketed latency stats instead of sort-based percentiles, so
-  long runs don't grow the sample vector unboundedly.
+- Pin one engine per core (CPU affinity) for the multi-symbol path; today the
+  per-symbol pipelines run on the OS scheduler.
+- Deeper synthetic L2 (more than top-of-book) so partial fills walk multiple
+  levels.
 - Persisting fills + reconciliation against a real exchange (paper account
   on Binance Testnet would be the first step).
 

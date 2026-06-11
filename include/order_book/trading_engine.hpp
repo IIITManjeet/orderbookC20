@@ -7,6 +7,7 @@
 
 #include "order_book/feed.hpp"
 #include "order_book/order_book.hpp"
+#include "order_book/risk.hpp"
 #include "order_book/spsc_queue.hpp"
 #include "order_book/strategy.hpp"
 
@@ -42,6 +43,11 @@ public:
     void start();
     void stop();
 
+    // Optional: enable a risk gate. Must be called before start(). Actions are
+    // clamped/rejected by RiskManager and the engine halts trading once the
+    // drawdown limit is breached. Additive — no effect unless called.
+    void set_risk(const RiskConfig& cfg) { risk_ = std::make_unique<RiskManager>(cfg); }
+
     Position position() const noexcept { return pos_; }
     Price last_mid() const noexcept { return last_mid_.load(std::memory_order_relaxed); }
     std::int64_t equity_at(Price mid) const noexcept;
@@ -57,6 +63,7 @@ private:
     SPSCQueue<MarketEvent>& source_;
     std::unique_ptr<Strategy> strategy_;
     FillCallback on_fill_;
+    std::unique_ptr<RiskManager> risk_;   // null unless set_risk() was called
     Position pos_{};
     OrderId  next_id_{3};   // 1,2 reserved for the synthetic bid/ask quotes
     std::atomic<Price> last_mid_{0};
