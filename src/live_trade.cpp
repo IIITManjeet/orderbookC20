@@ -15,6 +15,7 @@
 #include "order_book/risk.hpp"
 #include "order_book/spsc_queue.hpp"
 #include "order_book/strategy.hpp"
+#include "order_book/telemetry.hpp"
 #include "order_book/trading_engine.hpp"
 
 namespace {
@@ -71,7 +72,8 @@ static void print_usage() {
         "  --drift 0.0                  per-tick drift USD (synthetic)\n"
         "  --max-pos 0                  risk: max abs position BTC (0 = off)\n"
         "  --max-notional 0             risk: max abs position notional USD (0 = off)\n"
-        "  --max-drawdown 0             risk: halt after equity drops USD from peak (0 = off)\n");
+        "  --max-drawdown 0             risk: halt after equity drops USD from peak (0 = off)\n"
+        "  --log <path>                 write JSONL telemetry (meta/status/fill) to path (default: off)\n");
 }
 
 int main(int argc, char** argv) {
@@ -90,6 +92,7 @@ int main(int argc, char** argv) {
     double max_pos_btc     = 0.0;   // risk: max abs position in BTC (0 = off)
     double max_notional    = 0.0;   // risk: max abs position notional in USD (0 = off)
     double max_drawdown    = 0.0;   // risk: max equity drop from peak in USD (0 = off)
+    std::string log_path   = "";    // JSONL telemetry output path ("" = disabled)
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -110,6 +113,7 @@ int main(int argc, char** argv) {
         else if (a == "--max-pos")     max_pos_btc = std::atof(next("--max-pos"));
         else if (a == "--max-notional") max_notional = std::atof(next("--max-notional"));
         else if (a == "--max-drawdown") max_drawdown = std::atof(next("--max-drawdown"));
+        else if (a == "--log")          log_path = next("--log");
         else if (a == "-h" || a == "--help") { print_usage(); return 0; }
         else { std::fprintf(stderr, "unknown arg: %s\n", a.c_str()); print_usage(); return 1; }
     }
@@ -139,6 +143,36 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "no valid symbols in --symbol %s\n", symbol.c_str());
         return 1;
     }
+
+    // Off-hot-path telemetry. When --log is set, one multi-producer publisher
+    // (each engine thread + the status thread are producers) drains a deque on a
+    // dedicated thread and writes JSONL to a FileSink. Disabled => nullptr and
+    // every publish call is skipped, so the hot path is untouched.
+    std::unique_ptr<TelemetryPublisher> telemetry;
+    if (!log_path.empty()) {
+        telemetry = std::make_unique<TelemetryPublisher>();
+        auto sink = std::make_unique<FileSink>(log_path);
+        if (!sink->good()) {
+            std::fprintf(stderr, "could not open --log path: %s\n", log_path.c_str());
+            return 1;
+        }
+        telemetry->add_sink(std::move(sink));
+        telemetry->start();
+
+        std::string joined;
+        for (std::size_t i = 0; i < symbols.size(); ++i) {
+            if (i) joined += ',';
+            joined += '"';
+            joined += symbols[i];
+            joined += '"';
+        }
+        // feed transport tag is meaningful for binance; synthetic has no live
+        // transport, so report the (default "ws"|"rest") feed_kind to keep the
+        // schema's "ws|rest" value space.
+        telemetry->publish(
+            TelemetryPublisher::make_meta(source, feed_kind, joined));
+    }
+    TelemetryPublisher* tel = telemetry.get();
 
     MeanReversion::Config cfg;
     cfg.window    = 20;
@@ -183,7 +217,7 @@ int main(int argc, char** argv) {
         auto strat = std::make_unique<MeanReversion>(cfg);
 
         Pipeline* self = pipe.get();
-        auto on_fill = [self](const Fill& f) {
+        auto on_fill = [self, tel](const Fill& f) {
             const std::uint64_t lat_ns = (f.ts > f.event_ts) ? (f.ts - f.event_ts) : 0;
             {
                 std::lock_guard<std::mutex> g(self->lat_mu);
@@ -195,6 +229,13 @@ int main(int argc, char** argv) {
                         from_price(f.price),
                         from_qty(f.qty),
                         static_cast<double>(lat_ns) / 1000.0);
+            // Off-hot-path: hand a small POD to the publisher and return. All
+            // formatting + I/O happens on the publisher thread.
+            if (tel) {
+                tel->publish(TelemetryPublisher::make_fill(
+                    self->symbol, f.side, from_price(f.price), from_qty(f.qty),
+                    static_cast<double>(lat_ns) / 1000.0));
+            }
         };
 
         pipe->engine = std::make_unique<TradingEngine>(*pipe->queue, std::move(strat), on_fill);
@@ -222,13 +263,24 @@ int main(int argc, char** argv) {
             const Position p     = pipe->engine->position();
             const Price    mid   = pipe->engine->last_mid();
             const std::int64_t eq = (mid > 0) ? pipe->engine->equity_at(mid) : p.cash;
+            const double mid_usd    = from_price(mid);
+            const double pos_btc    = static_cast<double>(p.btc_qty) / kQuantityScale;
+            const double cash_usd   = static_cast<double>(p.cash) / kPriceScale;
+            const double equity_usd = static_cast<double>(eq) / kPriceScale;
             std::printf("[STATUS %s] mid=$%.2f  pos=%.6f BTC  cash=$%.2f  equity=$%.2f  fills=%zu\n",
                         pipe->symbol.c_str(),
-                        from_price(mid),
-                        static_cast<double>(p.btc_qty) / kQuantityScale,
-                        static_cast<double>(p.cash) / kPriceScale,
-                        static_cast<double>(eq) / kPriceScale,
+                        mid_usd,
+                        pos_btc,
+                        cash_usd,
+                        equity_usd,
                         p.fills);
+            if (tel) {
+                // Engine exposes only mid (no separate top-of-book at status
+                // time); report bid=ask=mid to honor the schema's required keys.
+                tel->publish(TelemetryPublisher::make_status(
+                    pipe->symbol, mid_usd, mid_usd, mid_usd, pos_btc, cash_usd,
+                    equity_usd, static_cast<std::uint64_t>(p.fills)));
+            }
         }
 
         if (run_seconds > 0 &&
@@ -241,6 +293,10 @@ int main(int argc, char** argv) {
         pipe->engine->stop();
         pipe->feed->stop();
     }
+
+    // Engines/feeds are stopped, so no more producers remain. Drain + join the
+    // publisher before printing final stats.
+    if (tel) tel->stop();
 
     for (auto& pipe : pipelines) {
         std::lock_guard<std::mutex> g(pipe->lat_mu);

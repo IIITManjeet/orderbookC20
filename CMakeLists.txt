@@ -63,10 +63,17 @@ if(BUILD_TESTS)
     target_compile_options(test_latency_hist PRIVATE ${OB_COMPILE_OPTS})
     target_link_options(test_latency_hist PRIVATE ${OB_LINK_OPTS})
 
+    # telemetry.hpp is header-only (no live_core / curl needed).
+    add_executable(test_telemetry tests/test_telemetry.cpp)
+    target_link_libraries(test_telemetry PRIVATE order_book gtest_main)
+    target_compile_options(test_telemetry PRIVATE ${OB_COMPILE_OPTS})
+    target_link_options(test_telemetry PRIVATE ${OB_LINK_OPTS})
+
     include(GoogleTest)
     gtest_discover_tests(test_order_book)
     gtest_discover_tests(test_risk)
     gtest_discover_tests(test_latency_hist)
+    gtest_discover_tests(test_telemetry)
 endif()
 
 if(BUILD_BENCH)
