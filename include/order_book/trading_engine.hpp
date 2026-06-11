@@ -49,13 +49,32 @@ public:
 private:
     void run();
     void apply_action(const StrategyAction& a, const MarketSnapshot& s);
+    // Refresh the synthetic top-of-book resting quotes (cancel + re-submit
+    // with stable OrderIds so resting state stays bounded). Skips ticks with
+    // zero or crossed prices.
+    void refresh_quotes(const MarketSnapshot& s);
 
     SPSCQueue<MarketEvent>& source_;
     std::unique_ptr<Strategy> strategy_;
     FillCallback on_fill_;
     Position pos_{};
-    OrderId  next_id_{1};
+    OrderId  next_id_{3};   // 1,2 reserved for the synthetic bid/ask quotes
     std::atomic<Price> last_mid_{0};
+
+    // Internal matching engine fed by the live feed. The two synthetic quotes
+    // use stable OrderIds (kBidQuoteId / kAskQuoteId) that are cancelled and
+    // re-submitted each tick. Taker orders use ids drawn from next_id_.
+    OrderBook book_;
+    static constexpr OrderId kBidQuoteId = 1;
+    static constexpr OrderId kAskQuoteId = 2;
+    bool bid_quote_live_{false};   // is kBidQuoteId currently resting?
+    bool ask_quote_live_{false};   // is kAskQuoteId currently resting?
+    // Cached top-of-book from the most recent valid tick, used to place the
+    // single opposite resting quote a taker crosses at action time.
+    Price    cur_bid_{0};
+    Price    cur_ask_{0};
+    Quantity cur_bid_qty_{0};
+    Quantity cur_ask_qty_{0};
 
     std::atomic<bool> running_{false};
     std::thread thread_;
