@@ -4,7 +4,7 @@
  * Modes:
  *   REPLAY (default) — fetches ./sample.jsonl (or ?file=<url>), replays
  *                      records in time order, looping at the end.
- *                      Speed controlled by ?speed=N (default 20).
+ *                      Speed controlled by ?speed=N (default 4).
  *   LIVE             — if ?ws=ws://host:port present, opens a WebSocket.
  *
  * Records follow the JSONL schema from the C++ trader:
@@ -27,7 +27,7 @@ const LAT_BUCKETS      = 20;    // histogram buckets
 const params    = new URLSearchParams(location.search);
 const WS_URL    = params.get('ws')    || null;
 const FILE_URL  = params.get('file')  || './sample.jsonl';
-const SPEED     = Math.max(0.1, parseFloat(params.get('speed') || '20'));
+const SPEED     = Math.max(0.1, parseFloat(params.get('speed') || '4'));
 const MODE      = WS_URL ? 'live' : 'replay';
 
 /* ─────────────────────── STATE ─────────────────────── */
@@ -83,7 +83,13 @@ function initCharts() {
           legend: { display: false },
           tooltip: {
             callbacks: {
-              label: ctx => ` ${ctx.dataset.label}: $${ctx.parsed.y.toFixed(2)}`,
+              // y is % change from each series' first point; show % and the
+              // absolute price (stashed on the point as .px).
+              label: ctx => {
+                const pct = ctx.parsed.y;
+                const px  = ctx.raw && ctx.raw.px != null ? ` ($${ctx.raw.px.toFixed(2)})` : '';
+                return ` ${ctx.dataset.label}: ${pct >= 0 ? '+' : ''}${pct.toFixed(3)}%${px}`;
+              },
             }
           }
         },
@@ -98,7 +104,9 @@ function initCharts() {
           },
           y: {
             grid: { color: '#21262d' },
-            ticks: { callback: v => '$' + v.toLocaleString() },
+            // % change from each symbol's first point, so symbols at very
+            // different price levels ($62k BTC vs $1.6k ETH) are comparable.
+            ticks: { callback: v => (v >= 0 ? '+' : '') + v.toFixed(2) + '%' },
           }
         }
       }
@@ -236,7 +244,10 @@ function renderCards() {
       card.innerHTML = `<div class="sym-name" style="color:${col}">${sym}</div>
         <div style="color:var(--muted);font-size:11px">Awaiting status…</div>`;
     } else {
-      const pnlRaw = s.equity - 100000;
+      // The paper-trader starts from ZERO cash — cash/equity are deltas, not an
+      // account balance. So net P&L is simply the equity (cash + mark-to-market
+      // position), not equity minus a starting balance.
+      const pnlRaw = s.equity;
       const pnlCol = pnlRaw >= 0 ? 'var(--green)' : 'var(--red)';
       const pnlSign = pnlRaw >= 0 ? '+' : '';
       card.innerHTML = `
@@ -269,7 +280,16 @@ function updatePriceChart() {
   state.symbols.forEach((sym, i) => {
     const ds = priceChart.data.datasets[i];
     if (!ds) return;
-    ds.data = state.priceHist[sym].map(p => ({ x: p.ts_ms, y: p.mid }));
+    const hist = state.priceHist[sym];
+    // Plot percent change from each symbol's first observed mid, so multiple
+    // symbols at different price levels share one readable axis. Keep the raw
+    // price on the point (.px) for the tooltip.
+    const base = hist.length ? hist[0].mid : 0;
+    ds.data = hist.map(p => ({
+      x: p.ts_ms,
+      y: base > 0 ? (p.mid / base - 1) * 100 : 0,
+      px: p.mid,
+    }));
   });
   priceChart.update('none');
 }
