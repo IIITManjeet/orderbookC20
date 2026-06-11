@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Order Book Telemetry Dashboard</title>
+  <link rel="stylesheet" href="style.css" />
+
+  <!--
+    Chart.js from CDN.
+    If the CDN is blocked the page degrades gracefully:
+    - app.js checks `typeof Chart === 'undefined'` and replaces the chart
+      containers with a plain text fallback message.
+    - All stat cards, the fills table, and latency numbers still work.
+  -->
+  <script
+    src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"
+    crossorigin="anonymous"
+    referrerpolicy="no-referrer"
+  ></script>
+</head>
+<body>
+<div id="app">
+
+  <!-- ═══════════ HEADER ═══════════ -->
+  <header>
+    <h1>&#9641; Order Book</h1>
+
+    <span id="status-pill" class="status-pill connecting">
+      <span class="dot"></span>
+      <span class="pill-text">STARTING…</span>
+    </span>
+
+    <span id="mode-badge" class="mode-badge"></span>
+  </header>
+
+  <!-- ═══════════ MAIN GRID ═══════════ -->
+  <main>
+
+    <!-- Symbol stat cards -->
+    <section id="sym-cards" class="panel">
+      <div class="panel-title">Symbols</div>
+      <div id="cards-row" class="cards-row">
+        <div class="empty-state">Loading…</div>
+      </div>
+    </section>
+
+    <!-- Price chart -->
+    <section id="price-chart-panel" class="panel">
+      <div class="panel-title">Mid Price</div>
+      <div id="chart-legend"></div>
+      <div id="chart-container">
+        <canvas id="price-chart-canvas"></canvas>
+      </div>
+    </section>
+
+    <!-- Fills table -->
+    <section id="fills-table-panel" class="panel">
+      <div class="panel-title">Recent Fills</div>
+      <div class="fills-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Symbol</th>
+              <th>Side</th>
+              <th>Price</th>
+              <th>Qty</th>
+              <th>Latency</th>
+            </tr>
+          </thead>
+          <tbody id="fills-tbody">
+            <tr><td colspan="6" class="empty-state">No fills yet.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Latency panel -->
+    <section id="lat-panel" class="panel">
+      <div class="panel-title">Fill Latency</div>
+
+      <div class="lat-stats">
+        <div class="lat-stat">
+          <div class="ls-label">MIN</div>
+          <div class="ls-val" id="lat-min">—</div>
+        </div>
+        <div class="lat-stat">
+          <div class="ls-label">P50</div>
+          <div class="ls-val" id="lat-p50">—</div>
+        </div>
+        <div class="lat-stat">
+          <div class="ls-label">P99</div>
+          <div class="ls-val" id="lat-p99">—</div>
+        </div>
+        <div class="lat-stat">
+          <div class="ls-label">MAX</div>
+          <div class="ls-val" id="lat-max">—</div>
+        </div>
+      </div>
+
+      <div id="lat-hist-container">
+        <canvas id="lat-hist-canvas"></canvas>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

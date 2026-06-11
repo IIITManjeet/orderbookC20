@@ -1,0 +1,299 @@
+/* ===== RESET & BASE ===== */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:       #0d1117;
+  --surface:  #161b22;
+  --border:   #30363d;
+  --text:     #e6edf3;
+  --muted:    #8b949e;
+  --accent:   #58a6ff;
+  --green:    #3fb950;
+  --red:      #f85149;
+  --yellow:   #d29922;
+  --purple:   #bc8cff;
+  --orange:   #ffa657;
+
+  /* per-symbol palette (cycled) */
+  --sym0: #58a6ff;
+  --sym1: #3fb950;
+  --sym2: #ffa657;
+  --sym3: #bc8cff;
+}
+
+html, body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  font-size: 13px;
+  min-height: 100vh;
+}
+
+a { color: var(--accent); }
+
+/* ===== LAYOUT ===== */
+#app {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+header {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 10px 20px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+
+header h1 {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  color: var(--accent);
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  border: 1px solid transparent;
+}
+.status-pill.connecting { border-color: var(--yellow); color: var(--yellow); }
+.status-pill.live       { border-color: var(--green);  color: var(--green);  }
+.status-pill.replay     { border-color: var(--purple); color: var(--purple); }
+.status-pill.error      { border-color: var(--red);    color: var(--red);    }
+
+.dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.dot.blink { animation: blink 1.2s step-end infinite; }
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.2} }
+
+.mode-badge {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+main {
+  flex: 1;
+  padding: 16px 20px;
+  display: grid;
+  gap: 16px;
+  grid-template-columns: 1fr;
+  grid-template-areas:
+    "sym-cards"
+    "price-chart"
+    "bottom-row";
+}
+
+@media (min-width: 1100px) {
+  main {
+    grid-template-columns: 1fr 1fr;
+    grid-template-areas:
+      "sym-cards   sym-cards"
+      "price-chart price-chart"
+      "fills-table lat-panel";
+  }
+}
+
+/* ===== PANELS ===== */
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+}
+
+.panel-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 12px;
+}
+
+/* ===== SYMBOL CARDS ===== */
+#sym-cards {
+  grid-area: sym-cards;
+}
+
+.cards-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.sym-card {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px 16px;
+  min-width: 200px;
+  flex: 1;
+  border-left-width: 3px;
+}
+
+.sym-card .sym-name {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  margin-bottom: 10px;
+}
+
+.sym-card .stat-grid {
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: 4px 16px;
+}
+
+.sym-card .stat-label { color: var(--muted); font-size: 11px; }
+.sym-card .stat-val   { font-size: 12px; text-align: right; }
+.sym-card .mid-val    { font-size: 17px; font-weight: 700; margin-bottom: 8px; }
+
+/* ===== PRICE CHART ===== */
+#price-chart-panel {
+  grid-area: price-chart;
+}
+
+#chart-container {
+  width: 100%;
+  height: 260px;
+  position: relative;
+}
+
+#price-chart-canvas {
+  width: 100% !important;
+  height: 100% !important;
+}
+
+.chart-fallback {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 260px;
+  color: var(--muted);
+  font-size: 12px;
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+}
+
+/* chart legend */
+#chart-legend {
+  display: flex;
+  gap: 14px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.legend-dot { width:8px; height:8px; border-radius:50%; }
+
+/* ===== FILLS TABLE ===== */
+#fills-table-panel {
+  grid-area: fills-table;
+}
+
+.fills-wrap {
+  overflow-y: auto;
+  max-height: 280px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+thead th {
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+  color: var(--muted);
+  font-weight: 600;
+  text-align: right;
+  padding: 4px 8px;
+  letter-spacing: 0.3px;
+  white-space: nowrap;
+}
+thead th:first-child { text-align: left; }
+
+tbody tr {
+  border-top: 1px solid var(--border);
+  transition: background 0.15s;
+}
+tbody tr:hover { background: rgba(255,255,255,0.03); }
+tbody td {
+  padding: 5px 8px;
+  text-align: right;
+  color: var(--text);
+  white-space: nowrap;
+}
+tbody td:first-child { text-align: left; }
+
+.side-buy  { color: var(--green);  font-weight: 700; }
+.side-sell { color: var(--red);    font-weight: 700; }
+.sym-label { font-size: 10px; font-weight: 600; padding: 1px 5px; border-radius: 3px; }
+
+/* ===== LATENCY PANEL ===== */
+#lat-panel {
+  grid-area: lat-panel;
+}
+
+.lat-stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.lat-stat { text-align: center; }
+.lat-stat .ls-label { font-size: 10px; color: var(--muted); margin-bottom: 3px; }
+.lat-stat .ls-val   { font-size: 16px; font-weight: 700; color: var(--accent); }
+
+#lat-hist-container {
+  height: 130px;
+  position: relative;
+}
+#lat-hist-canvas {
+  width: 100% !important;
+  height: 100% !important;
+}
+
+/* ===== SCROLLBAR ===== */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+/* ===== EMPTY STATE ===== */
+.empty-state {
+  color: var(--muted);
+  text-align: center;
+  padding: 24px;
+  font-size: 12px;
+}
+
+/* ===== GRID AREA wrappers for bottom row ===== */
+@media (max-width: 1099px) {
+  #fills-table-panel { grid-area: auto; }
+  #lat-panel         { grid-area: auto; }
+}
