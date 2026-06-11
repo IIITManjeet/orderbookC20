@@ -1,0 +1,75 @@
+name: Deploy dashboard to Pages
+
+# Publishes the static telemetry dashboard (web/) to GitHub Pages. The default
+# view replays a recorded session (web/sample.jsonl). On each run we also try to
+# capture a *fresh* live Binance session so the published demo stays current;
+# if the runner can't reach Binance, we fall back to the committed sample.
+#
+# One-time setup: repo Settings → Pages → Build and deployment → Source =
+# "GitHub Actions". Then this workflow deploys on push to web/, every 6h, or
+# via manual dispatch.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'web/**'
+      - '.github/workflows/pages.yml'
+  schedule:
+    - cron: '0 */6 * * *'   # refresh the recorded session every 6 hours
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev libssl-dev cmake ninja-build
+
+      - name: Build live_trade
+        run: |
+          cmake -G Ninja -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF -DBUILD_BENCH=OFF
+          cmake --build build -j --target live_trade
+
+      - name: Assemble site
+        run: |
+          mkdir -p site
+          cp -r web/* site/
+
+      - name: Capture fresh live session (best-effort)
+        run: |
+          timeout 80 ./build/live_trade \
+            --source binance --feed ws --symbol BTCUSDT,ETHUSDT \
+            --seconds 70 --max-pos 0.02 --log site/sample.jsonl || true
+          # Fall back to the committed sample if the live capture was too short
+          # (e.g. Binance unreachable from the runner).
+          if [ "$(wc -l < site/sample.jsonl 2>/dev/null || echo 0)" -lt 5 ]; then
+            echo "live capture insufficient — using committed sample"
+            cp web/sample.jsonl site/sample.jsonl
+          fi
+          echo "site/sample.jsonl: $(wc -l < site/sample.jsonl) records"
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4

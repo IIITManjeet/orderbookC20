@@ -127,6 +127,7 @@ if(BUILD_LIVE)
     add_library(live_core STATIC
         src/feed.cpp
         src/trading_engine.cpp
+        src/telemetry_ws.cpp
     )
     target_include_directories(live_core PUBLIC include)
     target_link_libraries(live_core

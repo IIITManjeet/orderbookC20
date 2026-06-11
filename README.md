@@ -101,6 +101,50 @@ default 200 µs engine back-off sleep enabled, p50 climbs to ~150 µs because
 events arriving mid-sleep wait out the remainder. Toggle by uncommenting the
 `sleep_for` line in `src/trading_engine.cpp` to compare both regimes.
 
+## Live dashboard & telemetry
+
+The trader can emit a structured telemetry stream **off the hot path** — the
+engine thread only hands a small POD to a publisher thread, which formats JSON
+and does the I/O, so the latency numbers stay clean. One newline-delimited JSON
+record per event:
+
+```
+{"t":"meta",  "ts_ns":…,"source":"binance","feed":"ws","symbols":["BTCUSDT","ETHUSDT"]}
+{"t":"status","ts_ns":…,"sym":"BTCUSDT","mid":62530.55,"bid":…,"ask":…,"pos_btc":…,"cash":…,"equity":…,"fills":…}
+{"t":"fill",  "ts_ns":…,"sym":"ETHUSDT","side":"SELL","px":1640.18,"qty":0.001,"lat_us":12.2}
+```
+
+Two sinks, independently selectable:
+
+```
+./build/live_trade --source binance --symbol BTCUSDT,ETHUSDT --log session.jsonl   # write JSONL to a file
+./build/live_trade --source binance --symbol BTCUSDT,ETHUSDT --serve 8080          # stream over a WebSocket
+```
+
+`web/` is a dependency-free dashboard (vanilla JS + Chart.js via CDN) that
+renders the live mid per symbol, position/equity cards, a fills table, and a
+latency view. Two modes via query string:
+
+- **Replay (default)**: `web/index.html` plays back `web/sample.jsonl` (a real
+  recorded session) — works as a pure static page, no backend.
+- **Live**: `web/index.html?ws=ws://localhost:8080` connects to a running
+  `--serve` instance and updates in real time.
+
+Serve it locally with `python3 -m http.server` inside `web/`, then open the
+page. See `web/README.md` for details.
+
+### Free hosting (GitHub Actions + Pages)
+
+- `.github/workflows/ci.yml` builds and runs all tests on every push.
+- `.github/workflows/pages.yml` publishes `web/` to **GitHub Pages**, and on a
+  6-hour schedule it runs `live_trade` against Binance to refresh
+  `sample.jsonl` with a fresh real session (falling back to the committed
+  sample if the runner can't reach Binance). One-time setup: repo **Settings →
+  Pages → Source = "GitHub Actions"**. The published page shows genuine engine
+  output via replay — free and always-on, with no live backend to host. A
+  continuously-live demo would need an always-on host (Fly.io / Render / Oracle
+  free tier) pointed at by `?ws=`.
+
 ## Layout
 
 ```

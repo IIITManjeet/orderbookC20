@@ -16,6 +16,7 @@
 #include "order_book/spsc_queue.hpp"
 #include "order_book/strategy.hpp"
 #include "order_book/telemetry.hpp"
+#include "order_book/telemetry_ws.hpp"
 #include "order_book/trading_engine.hpp"
 
 namespace {
@@ -73,7 +74,8 @@ static void print_usage() {
         "  --max-pos 0                  risk: max abs position BTC (0 = off)\n"
         "  --max-notional 0             risk: max abs position notional USD (0 = off)\n"
         "  --max-drawdown 0             risk: halt after equity drops USD from peak (0 = off)\n"
-        "  --log <path>                 write JSONL telemetry (meta/status/fill) to path (default: off)\n");
+        "  --log <path>                 write JSONL telemetry (meta/status/fill) to path (default: off)\n"
+        "  --serve <port>               stream JSONL telemetry over a WebSocket server for the dashboard (0 = off)\n");
 }
 
 int main(int argc, char** argv) {
@@ -93,6 +95,7 @@ int main(int argc, char** argv) {
     double max_notional    = 0.0;   // risk: max abs position notional in USD (0 = off)
     double max_drawdown    = 0.0;   // risk: max equity drop from peak in USD (0 = off)
     std::string log_path   = "";    // JSONL telemetry output path ("" = disabled)
+    int    serve_port      = 0;     // WebSocket telemetry server port (0 = disabled)
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -114,6 +117,7 @@ int main(int argc, char** argv) {
         else if (a == "--max-notional") max_notional = std::atof(next("--max-notional"));
         else if (a == "--max-drawdown") max_drawdown = std::atof(next("--max-drawdown"));
         else if (a == "--log")          log_path = next("--log");
+        else if (a == "--serve")        serve_port = std::atoi(next("--serve"));
         else if (a == "-h" || a == "--help") { print_usage(); return 0; }
         else { std::fprintf(stderr, "unknown arg: %s\n", a.c_str()); print_usage(); return 1; }
     }
@@ -149,14 +153,19 @@ int main(int argc, char** argv) {
     // dedicated thread and writes JSONL to a FileSink. Disabled => nullptr and
     // every publish call is skipped, so the hot path is untouched.
     std::unique_ptr<TelemetryPublisher> telemetry;
-    if (!log_path.empty()) {
+    if (!log_path.empty() || serve_port > 0) {
         telemetry = std::make_unique<TelemetryPublisher>();
-        auto sink = std::make_unique<FileSink>(log_path);
-        if (!sink->good()) {
-            std::fprintf(stderr, "could not open --log path: %s\n", log_path.c_str());
-            return 1;
+        if (!log_path.empty()) {
+            auto sink = std::make_unique<FileSink>(log_path);
+            if (!sink->good()) {
+                std::fprintf(stderr, "could not open --log path: %s\n", log_path.c_str());
+                return 1;
+            }
+            telemetry->add_sink(std::move(sink));
         }
-        telemetry->add_sink(std::move(sink));
+        if (serve_port > 0) {
+            telemetry->add_sink(make_ws_sink(serve_port));
+        }
         telemetry->start();
 
         std::string joined;
