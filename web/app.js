@@ -3,9 +3,11 @@
  *
  * Modes:
  *   REPLAY (default) — fetches ./sample.jsonl (or ?file=<url>), replays
- *                      records in time order, looping at the end.
- *                      Speed controlled by ?speed=N (default 4).
- *   LIVE             — if ?ws=ws://host:port present, opens a WebSocket.
+ *                      records in time order, then HOLDS the full session on
+ *                      screen. Speed via ?speed=N (default 4); ?loop=1 repeats.
+ *   LIVE             — if ?ws=ws://host:port present, opens a WebSocket and
+ *                      snapshots to sessionStorage so a refresh restores it
+ *                      (cleared when the tab closes — nothing kept long-term).
  *
  * Records follow the JSONL schema from the C++ trader:
  *   {"t":"meta",   "ts_ns":..., "source":..., "feed":..., "symbols":[...]}
@@ -28,7 +30,13 @@ const params    = new URLSearchParams(location.search);
 const WS_URL    = params.get('ws')    || null;
 const FILE_URL  = params.get('file')  || './sample.jsonl';
 const SPEED     = Math.max(0.1, parseFloat(params.get('speed') || '4'));
+const LOOP      = params.get('loop') === '1';   // replay: repeat (wipes each cycle) vs play-once-and-hold
 const MODE      = WS_URL ? 'live' : 'replay';
+
+// Ephemeral persistence: snapshot the LIVE session to sessionStorage so a page
+// refresh restores it. sessionStorage (not localStorage) auto-clears when the
+// tab closes — refresh-proof, but nothing is kept long-term or on disk.
+const STORE_KEY = 'ob-dash-session-v1';
 
 /* ─────────────────────── STATE ─────────────────────── */
 const symColors = ['#58a6ff','#3fb950','#ffa657','#bc8cff','#f85149','#d29922'];
@@ -195,6 +203,55 @@ function processRecord(rec) {
     case 'status': handleStatus(rec); break;
     case 'fill':   handleFill(rec);   break;
   }
+  saveState();
+}
+
+/* ─────────────────────── EPHEMERAL PERSISTENCE (sessionStorage) ─────────────────────── */
+let _lastSave = 0;
+function saveState() {
+  if (MODE !== 'live') return;            // replay's source file is already its persistence
+  const now = Date.now();
+  if (now - _lastSave < 1000) return;     // throttle to ~1/s
+  _lastSave = now;
+  try {
+    sessionStorage.setItem(STORE_KEY, JSON.stringify({
+      symbols: state.symbols, symIndex: state.symIndex, stats: state.stats,
+      priceHist: state.priceHist, fills: state.fills,
+      latSamples: state.latSamples, meta: state.meta,
+    }));
+  } catch (e) { /* quota/disabled — non-fatal */ }
+}
+
+function loadState() {
+  try {
+    const raw = sessionStorage.getItem(STORE_KEY);
+    if (!raw) return false;
+    const o = JSON.parse(raw);
+    if (!o || !Array.isArray(o.symbols) || o.symbols.length === 0) return false;
+    state.symbols    = o.symbols;
+    state.symIndex   = o.symIndex   || {};
+    state.stats      = o.stats      || {};
+    state.priceHist  = o.priceHist  || {};
+    state.fills      = o.fills      || [];
+    state.latSamples = o.latSamples || [];
+    state.meta       = o.meta       || null;
+    return true;
+  } catch (e) { return false; }
+}
+
+// Rebuild all views (chart datasets, legend, tables) from restored state.
+function rebuildFromState() {
+  if (priceChart) {
+    priceChart.data.datasets = state.symbols.map(sym => ({
+      label: sym, data: [], borderColor: colorForSym(sym),
+      backgroundColor: 'transparent', borderWidth: 1.5, pointRadius: 0, tension: 0.2,
+    }));
+  }
+  updateLegend();
+  updatePriceChart();
+  renderCards();
+  renderFillsTable();
+  renderLatency();
 }
 
 function handleMeta(rec) {
@@ -416,9 +473,18 @@ async function startReplay(fileUrl) {
       }
       processRecord(rec);
     }
-    // loop: restart after brief pause
+
+    if (!LOOP) {
+      // Play once and HOLD the completed session on screen — no destructive
+      // wipe. Add ?loop=1 to repeat instead.
+      setPill('replay', 'COMPLETE');
+      $modeBadge.textContent =
+        `REPLAY  ·  ${records.length} records  ·  complete (add ?loop=1 to repeat)  ·  ${fileUrl}`;
+      return;
+    }
+
+    // ?loop=1: restart after a brief pause with a clean slate.
     await sleep(1500);
-    // reset visual state for a clean loop
     state.symbols    = [];
     state.symIndex   = {};
     state.stats      = {};
@@ -491,6 +557,8 @@ window.addEventListener('DOMContentLoaded', () => {
   renderFillsTable();
 
   if (MODE === 'live') {
+    // Restore the prior session (if this is a refresh) before streaming resumes.
+    if (loadState()) rebuildFromState();
     startLive(WS_URL);
   } else {
     startReplay(FILE_URL);
